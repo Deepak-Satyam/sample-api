@@ -5,6 +5,6 @@ ignore:
   - "POST /api/products added"
 
 remote:
-  enabled: false
+  enabled: true
   url: "https://specshield.io/compare"
   timeout: 10000
