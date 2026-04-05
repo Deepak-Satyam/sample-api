@@ -1,0 +1,10 @@
+failOnBreaking: true
+severity: error
+
+ignore:
+  - "POST /api/products added"
+
+remote:
+  enabled: false
+  url: "https://specshield.io/compare"
+  timeout: 10000

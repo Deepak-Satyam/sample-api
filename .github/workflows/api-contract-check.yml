@@ -1,0 +1,228 @@
+name: API Contract Check — SpecShield CLI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 1: Local compare — v1 vs v2 (no auth, no network)
+  # Demonstrates: basic compare, --fail-on-breaking, --json, --output, --ignore
+  # ────────────────────────────────────────────────────────────────────────────
+  local-compare:
+    name: Local Compare (v1 → v2)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install SpecShield CLI
+        run: npm install -g specshield
+
+      - name: Show all changes (human-readable)
+        run: specshield compare specs/v1.yaml specs/v2.yaml
+
+      - name: Fail on breaking changes
+        run: specshield compare specs/v1.yaml specs/v2.yaml --fail-on-breaking
+        continue-on-error: true   # expected to fail — v2 has breaking changes
+
+      - name: JSON output saved to file
+        run: specshield compare specs/v1.yaml specs/v2.yaml --json --output diff-report.json
+
+      - name: Show report summary
+        run: |
+          echo "=== SpecShield Report Summary ==="
+          cat diff-report.json | python3 -c "
+          import json, sys
+          r = json.load(sys.stdin)['summary']
+          print(f'Breaking : {r[\"breaking\"]}')
+          print(f'Additions: {r[\"additions\"]}')
+          print(f'Modified : {r[\"modifications\"]}')
+          print(f'Warnings : {r[\"warnings\"]}')
+          "
+
+      - name: Ignore a known breaking change
+        run: |
+          specshield compare specs/v1.yaml specs/v2.yaml \
+            --ignore "DELETE /api/users/{id} removed" \
+            --fail-on-breaking
+        continue-on-error: true
+
+      - name: Upload diff report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-diff-report
+          path: diff-report.json
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 2: Local compare with .specshield.yml config file
+  # Demonstrates: --config flag
+  # ────────────────────────────────────────────────────────────────────────────
+  local-compare-with-config:
+    name: Local Compare (with config file)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install SpecShield CLI
+        run: npm install -g specshield
+
+      - name: Compare using .specshield.yml
+        run: specshield compare specs/v1.yaml specs/v2.yaml --config .specshield.yml
+        continue-on-error: true
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 3: Live spec compare — build & run Spring Boot, generate spec, compare
+  # Demonstrates: real-world CI workflow with auto-generated spec
+  # ────────────────────────────────────────────────────────────────────────────
+  live-spec-compare:
+    name: Live Spec Compare (Spring Boot → SpecShield)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cache Maven packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: ${{ runner.os }}-maven-
+
+      - name: Build Spring Boot app
+        run: mvn clean package -DskipTests -q
+
+      - name: Start Spring Boot app in background
+        run: |
+          java -jar target/*.jar &
+          echo "APP_PID=$!" >> $GITHUB_ENV
+
+      - name: Wait for app to be ready
+        run: |
+          echo "Waiting for Spring Boot to start..."
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8085/v3/api-docs > /dev/null 2>&1; then
+              echo "App is ready."
+              break
+            fi
+            echo "  Attempt $i/30..."
+            sleep 3
+          done
+
+      - name: Download live OpenAPI spec from running app
+        run: |
+          curl -s http://localhost:8085/v3/api-docs -o live-spec.json
+          echo "=== Live spec info ==="
+          cat live-spec.json | python3 -c "
+          import json, sys
+          s = json.load(sys.stdin)
+          print(f'Title   : {s[\"info\"][\"title\"]}')
+          print(f'Version : {s[\"info\"][\"version\"]}')
+          print(f'Paths   : {list(s[\"paths\"].keys())}')
+          "
+
+      - name: Install SpecShield CLI
+        run: npm install -g specshield
+
+      - name: Compare committed v1 spec vs live app spec
+        run: |
+          specshield compare specs/v1.yaml live-spec.json \
+            --json \
+            --output live-diff-report.json
+        continue-on-error: true
+
+      - name: Show live diff summary
+        if: always()
+        run: |
+          echo "=== Live Spec Diff Summary ==="
+          cat live-diff-report.json | python3 -c "
+          import json, sys
+          r = json.load(sys.stdin)['summary']
+          print(f'Breaking : {r[\"breaking\"]}')
+          print(f'Additions: {r[\"additions\"]}')
+          print(f'Modified : {r[\"modifications\"]}')
+          print(f'Warnings : {r[\"warnings\"]}')
+          "
+
+      - name: Stop Spring Boot app
+        if: always()
+        run: kill $APP_PID || true
+
+      - name: Upload live diff report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-diff-report
+          path: live-diff-report.json
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 4: Remote compare — sends specs to SpecShield hosted API
+  # Requires: SPECSHIELD_API_KEY secret in GitHub Actions settings
+  # Demonstrates: --remote flag, env var auth
+  # ────────────────────────────────────────────────────────────────────────────
+  remote-compare:
+    name: Remote Compare (SpecShield Hosted API)
+    runs-on: ubuntu-latest
+    if: ${{ vars.ENABLE_REMOTE_COMPARE == 'true' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install SpecShield CLI
+        run: npm install -g specshield
+
+      - name: Remote compare — v1 vs v2
+        env:
+          SPECSHIELD_API_KEY: ${{ secrets.SPECSHIELD_API_KEY }}
+        run: |
+          specshield compare specs/v1.yaml specs/v2.yaml \
+            --remote \
+            --json \
+            --output remote-diff-report.json
+        continue-on-error: true
+
+      - name: Show remote diff summary
+        if: always()
+        run: |
+          echo "=== Remote Diff Summary ==="
+          cat remote-diff-report.json | python3 -c "
+          import json, sys
+          r = json.load(sys.stdin)['summary']
+          print(f'Breaking : {r[\"breaking\"]}')
+          print(f'Additions: {r[\"additions\"]}')
+          print(f'Modified : {r[\"modifications\"]}')
+          print(f'Warnings : {r[\"warnings\"]}')
+          "
+
+      - name: Upload remote diff report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: remote-diff-report
+          path: remote-diff-report.json

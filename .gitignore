@@ -1,0 +1,11 @@
+target/
+*.class
+*.jar
+*.war
+.env
+result.json
+report.json
+*.iml
+out/
+.idea/
+.DS_Store
