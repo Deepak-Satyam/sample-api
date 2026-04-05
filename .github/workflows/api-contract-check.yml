@@ -185,7 +185,6 @@ jobs:
   remote-compare:
     name: Remote Compare (SpecShield Hosted API)
     runs-on: ubuntu-latest
-    if: ${{ secrets.SPECSHIELD_API_KEY != '' }}
 
     steps:
       - uses: actions/checkout@v4
